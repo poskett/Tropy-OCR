@@ -23,7 +23,7 @@ below before running it on a project.
 - Privacy (images do not leave your computer)
 - Rights (no external AI model training)
 - Cost (no payment for commercial service)
-- Reproducability (specific models can be selected and pinned)
+- Citability (specific models can be selected and pinned)
 
 ## What it does
 
