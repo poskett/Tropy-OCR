@@ -12,7 +12,7 @@ file was generated from the Claude Code project and then edited by James Poskett
 
 ## Disclaimer
 This Python script is an independent, unofficial tool. It is not affiliated with or
-endorsed by the Tropy project. It is released **as is and without *warranty**.
+endorsed by the Tropy project. It is released **as is and without warranty**.
 
 It works by reading and writing Tropy's
 internal SQLite database directly, so please read the **Safety** section
