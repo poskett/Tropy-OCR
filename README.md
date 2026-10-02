@@ -62,7 +62,7 @@ A few good options:
 - [qwen3-vl:8b-instruct-q4_K_M](https://ollama.com/library/qwen3-vl:8b-instruct-q4_K_M)
 - [ministral-3:8b-instruct-2512-q4_K_M](https://ollama.com/library/ministral-3:8b-instruct-2512-q4_K_M)
 
-Both will run on a M5 MacBook wiht 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
+Both will run on a M5 MacBook with 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
 
 ## Install
 
