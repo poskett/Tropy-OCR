@@ -12,7 +12,7 @@ file was generated from the Claude Code project and then edited by James Poskett
 
 ## Disclaimer
 This Python script is an independent, unofficial tool. It is not affiliated with or
-endorsed by the Tropy project. It is released **as is and without warranty**.
+endorsed by the Tropy project. It is released **as is and without *warranty**.
 
 It works by reading and writing Tropy's
 internal SQLite database directly, so please read the **Safety** section
@@ -23,7 +23,7 @@ below before running it on a project.
 - Privacy (images do not leave your computer)
 - Rights (no external AI model training)
 - Cost (no payment for commercial service)
-- Citability (specific models can be selected and pinned)
+- Reproducability (specific models can be selected and pinned)
 
 ## What it does
 
@@ -51,6 +51,18 @@ below before running it on a project.
   pulled (e.g. `ollama pull qwen3-vl:30b-a3b-instruct-q4_K_M`)
 - For `--engine tesseract`: the `tesseract` binary installed separately
 - Tropy, **closed**, while you run this tool
+
+## Which model?
+
+It is important to use an "instruct" version of a vision model (without reasoning or thinking).
+Otherwise, the model will spend all its tokens reasoning and fail to write a transcript.
+
+A few good options:
+
+- [qwen3-vl:8b-instruct-q4_K_M](https://ollama.com/library/qwen3-vl:8b-instruct-q4_K_M)
+- [ministral-3:8b-instruct-2512-q4_K_M](https://ollama.com/library/ministral-3:8b-instruct-2512-q4_K_M)
+
+Both will run on a M5 MacBook wiht 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
 
 ## Install
 

@@ -18,10 +18,11 @@ import pytesseract
 import requests
 from PIL import Image
 
-DEFAULT_MODEL = "qwen3-vl:30b-a3b-instruct-q4_K_M"
+DEFAULT_MODEL = "qwen3-vl:8b-instruct-q4_K_M"
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_TAG = "ocr:auto"
 DEFAULT_TESSERACT_LANG = "eng"
+DEFAULT_MAX_THINK_TOKENS = 1000
 
 MARKER_PREFIX = "[Automated OCR - model:"
 MARKER_RE = re.compile(re.escape(MARKER_PREFIX) + r".*?\]")
@@ -60,6 +61,10 @@ PROMPTS = {
         + NO_TEXT_INSTRUCTION
     ),
 }
+
+
+class ThinkingLimitError(RuntimeError):
+    pass
 
 
 def build_arg_parser():
@@ -154,6 +159,16 @@ def build_arg_parser():
         help="Maximum tokens the model may generate per photo (raise for dense full pages)",
     )
     parser.add_argument(
+        "--max-think-tokens",
+        type=int,
+        default=DEFAULT_MAX_THINK_TOKENS,
+        help=(
+            "Abort if the model produces this many thinking tokens without starting "
+            "a transcript (0 disables). Thinking models can use their whole budget "
+            "thinking; an -instruct version of the model is usually better for OCR."
+        ),
+    )
+    parser.add_argument(
         "--num-ctx",
         type=int,
         default=8192,
@@ -184,6 +199,7 @@ def warn_on_irrelevant_engine_flags(args):
             "--num-ctx": (args.num_ctx, 8192),
             "--repeat-penalty": (args.repeat_penalty, 1.3),
             "--max-tokens": (args.max_tokens, 4096),
+            "--max-think-tokens": (args.max_think_tokens, DEFAULT_MAX_THINK_TOKENS),
         }
         ignored = [flag for flag, (value, default) in vision_only.items() if value != default]
         if ignored:
@@ -510,13 +526,13 @@ def describe_ollama_error(error, server_detail):
     return str(error)
 
 
-def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens, num_ctx, repeat_penalty):
+def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens, num_ctx, repeat_penalty, max_think_tokens):
     url = f"{host.rstrip('/')}/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
         "images": [image_b64],
-        "stream": False,
+        "stream": True,
         "options": {
             "temperature": 0,
             "num_predict": max_tokens,
@@ -527,10 +543,31 @@ def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens, nu
     last_error = None
     for attempt in range(retries + 1):
         try:
-            response = requests.post(url, json=payload, timeout=timeout)
+            response = requests.post(url, json=payload, timeout=timeout, stream=True)
             response.raise_for_status()
-            data = response.json()
-            return data.get("response", "").strip()
+            parts = []
+            thinking_chunks = 0
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                if chunk.get("error"):
+                    raise RuntimeError(chunk["error"])
+                if chunk.get("response"):
+                    parts.append(chunk["response"])
+                if chunk.get("thinking"):
+                    thinking_chunks += 1
+                    if max_think_tokens and not parts and thinking_chunks > max_think_tokens:
+                        response.close()
+                        raise ThinkingLimitError(
+                            f"model used {thinking_chunks} thinking tokens without writing a "
+                            "transcript - try an -instruct version of the model"
+                        )
+                if chunk.get("done"):
+                    break
+            return "".join(parts).strip()
+        except ThinkingLimitError:
+            raise
         except requests.HTTPError as error:
             server_detail = ""
             try:
@@ -662,6 +699,7 @@ def process_photo(conn, project_dir, photo, args, tag_id):
                 args.max_tokens,
                 args.num_ctx,
                 args.repeat_penalty,
+                args.max_think_tokens,
             )
             engine_label = args.model
         ocr_text = clean_ocr_text(raw_text)
@@ -671,6 +709,15 @@ def process_photo(conn, project_dir, photo, args, tag_id):
         final_text = finalize_note_text(ocr_text, engine_label)
         plain_text = build_note_plain_text(final_text)
         state = build_note_state(final_text)
+    except ThinkingLimitError as error:
+        return {
+            "photo_id": photo["photo_id"],
+            "filename": photo["filename"],
+            "status": "failed",
+            "error": str(error),
+            "thinking_abort": True,
+            "elapsed": time.time() - start,
+        }
     except Exception as error:
         return {
             "photo_id": photo["photo_id"],
@@ -788,6 +835,14 @@ def main(argv=None):
             counts[result["status"]] = counts.get(result["status"], 0) + 1
             if result["status"] == "failed":
                 failed_ids.append(photo["photo_id"])
+            if result.get("thinking_abort"):
+                print(
+                    "Stopping: the model is spending its token budget thinking, and every "
+                    "remaining photo would do the same. Use an -instruct model, or raise "
+                    "--max-think-tokens.",
+                    file=sys.stderr,
+                )
+                break
     finally:
         if log_handle:
             log_handle.close()
