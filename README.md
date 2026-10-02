@@ -199,7 +199,9 @@ Run `python tropy_ocr.py --help` for the full list.
 - This tool writes `notes.text`/`notes.state` to match Tropy's own internal
   format as closely as possible. It is not an official API and could in principle need updating
   if Tropy changes its note storage format in a future release.
-
+- Tropy requires a language tag for notes (default: en). This tool does not detect language
+  (to avoid complexity). Therefore, all notes will be marked 'en'. (This is separate from the 
+  'item' language, which can be set manually by the user correctly within Tropy.)
 ## Tropy and MacOS Version
 The tool was developed and tested on Tropy Version 1.17.3 (arm64) on Mac OS 26.6.2 (25G83).
 
