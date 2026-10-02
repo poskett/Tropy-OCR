@@ -9,19 +9,29 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytesseract
 import requests
 from PIL import Image
 
 DEFAULT_MODEL = "qwen3-vl:30b-a3b-instruct-q4_K_M"
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_TAG = "ocr:auto"
+DEFAULT_TESSERACT_LANG = "eng"
 
 MARKER_PREFIX = "[Automated OCR - model:"
 MARKER_RE = re.compile(re.escape(MARKER_PREFIX) + r".*?\]")
+
+NO_TEXT_INSTRUCTION = (
+    "If the image contains no legible text at all - for example a blank or "
+    "blurred surface, or a photograph of an object, wall, desk, or person "
+    "with no writing on it - respond with exactly: [no text identified]. "
+    "Do not invent, guess, or hallucinate any transcription in that case."
+)
 
 PROMPTS = {
     "auto": (
@@ -30,14 +40,14 @@ PROMPTS = {
         "present. Preserve the original line breaks. Do not add any "
         "commentary, headings, markdown formatting, or summary. If a word or "
         "passage is illegible, write [illegible] in its place. Output only "
-        "the transcription."
+        "the transcription. " + NO_TEXT_INSTRUCTION
     ),
     "printed": (
         "Transcribe the printed text visible in this image of a historical "
         "document exactly as it appears, preserving the original line "
         "breaks. Do not add any commentary, headings, markdown formatting, "
         "or summary. If a word or passage is illegible, write [illegible] in "
-        "its place. Output only the transcription."
+        "its place. Output only the transcription. " + NO_TEXT_INSTRUCTION
     ),
     "handwritten": (
         "Transcribe the handwritten text visible in this image of a "
@@ -46,7 +56,8 @@ PROMPTS = {
         "difficult to read; if a word is uncertain, give your best guess "
         "followed by [?], and use [illegible] where no reasonable guess is "
         "possible. Do not add any commentary, headings, markdown "
-        "formatting, or summary. Output only the transcription."
+        "formatting, or summary. Output only the transcription. "
+        + NO_TEXT_INSTRUCTION
     ),
 }
 
@@ -59,13 +70,27 @@ def build_arg_parser():
         )
     )
     parser.add_argument("--project", required=True, help="Path to the .tropy project bundle")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama vision model name")
-    parser.add_argument("--ollama-host", default=DEFAULT_HOST, help="Ollama server URL")
+    parser.add_argument(
+        "--engine",
+        choices=["vision", "tesseract"],
+        default="vision",
+        help=(
+            "OCR engine to use: 'vision' calls a local Ollama vision model, "
+            "'tesseract' calls the local tesseract through Python instead"
+        ),
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama vision model name (--engine vision only)")
+    parser.add_argument("--ollama-host", default=DEFAULT_HOST, help="Ollama server URL (--engine vision only)")
+    parser.add_argument(
+        "--tesseract-lang",
+        default=DEFAULT_TESSERACT_LANG,
+        help="Tesseract language code, e.g. eng, fra, lat (--engine tesseract only)",
+    )
     parser.add_argument(
         "--mode",
         choices=["auto", "printed", "handwritten"],
         default="auto",
-        help="Transcription style hint",
+        help="Transcription style hint (--engine vision only)",
     )
     parser.add_argument("--item", type=int, action="append", help="Restrict to this item id (repeatable)")
     parser.add_argument("--photo", type=int, action="append", help="Restrict to this photo id (repeatable)")
@@ -77,14 +102,25 @@ def build_arg_parser():
         help="Print the item/photo ids and filenames matching your filters, then exit without running OCR",
     )
     parser.add_argument("--limit", type=int, help="Process at most this many photos")
+    parser.add_argument(
+        "--output",
+        choices=["notes", "txt", "both"],
+        default="notes",
+        help=(
+            "Where to write transcriptions: 'notes' writes into Tropy Notes (default), "
+            "'txt' writes one .txt file per photo under --txt-dir instead, 'both' does both"
+        ),
+    )
+    parser.add_argument(
+        "--txt-dir",
+        help=(
+            "Directory to write .txt transcription files into, one per photo under "
+            "item_<item_id>/photo_<photo_id>_<filename>.txt (required with --output txt or both)"
+        ),
+    )
     parser.add_argument("--tag", default=DEFAULT_TAG, help="Tag applied to processed photos")
     parser.add_argument("--tag-color", help="Color for the tag, e.g. #ff8c19")
     parser.add_argument("--no-tag", action="store_true", help="Do not tag processed photos")
-    parser.add_argument(
-        "--no-marker",
-        action="store_true",
-        help="Do not append the automated-OCR marker footer to notes",
-    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -117,7 +153,44 @@ def build_arg_parser():
         default=4096,
         help="Maximum tokens the model may generate per photo (raise for dense full pages)",
     )
+    parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=8192,
+        help=(
+            "Context window size given to the model. Must comfortably fit the image "
+            "tokens, the prompt, and --max-tokens combined, or the request fails with "
+            "a context-overflow error."
+        ),
+    )
+    parser.add_argument(
+        "--repeat-penalty",
+        type=float,
+        default=1.3,
+        help=(
+            "Penalty applied to already-generated tokens. Above 1.0 to stop the model "
+            "looping on the same token on blank or badly damaged pages."
+        ),
+    )
     return parser
+
+
+def warn_on_irrelevant_engine_flags(args):
+    if args.engine == "tesseract":
+        vision_only = {
+            "--mode": (args.mode, "auto"),
+            "--model": (args.model, DEFAULT_MODEL),
+            "--ollama-host": (args.ollama_host, DEFAULT_HOST),
+            "--num-ctx": (args.num_ctx, 8192),
+            "--repeat-penalty": (args.repeat_penalty, 1.3),
+            "--max-tokens": (args.max_tokens, 4096),
+        }
+        ignored = [flag for flag, (value, default) in vision_only.items() if value != default]
+        if ignored:
+            print(f"Note: {', '.join(ignored)} is ignored with --engine tesseract", file=sys.stderr)
+    else:
+        if args.tesseract_lang != DEFAULT_TESSERACT_LANG:
+            print("Note: --tesseract-lang is ignored with --engine vision", file=sys.stderr)
 
 
 def project_paths(project_arg):
@@ -281,7 +354,7 @@ def resolve_list_ids(conn, list_name):
     return [row["list_id"] for row in descendant_rows]
 
 
-def build_selection(conn, args, tag_id):
+def build_selection(conn, args):
     clauses = [
         "photos.id NOT IN (SELECT id FROM trash)",
         "photos.item_id NOT IN (SELECT id FROM trash)",
@@ -309,15 +382,11 @@ def build_selection(conn, args, tag_id):
         clauses.append("photos.filename GLOB ?")
         params.append(args.filename_glob)
     if not args.overwrite:
-        if args.no_tag:
-            clauses.append(
-                "photos.id NOT IN ("
-                "SELECT id FROM notes WHERE deleted IS NULL AND text LIKE ?)"
-            )
-            params.append(f"%{MARKER_PREFIX}%")
-        else:
-            clauses.append("photos.id NOT IN (SELECT id FROM taggings WHERE tag_id = ?)")
-            params.append(tag_id)
+        clauses.append(
+            "photos.id NOT IN ("
+            "SELECT id FROM notes WHERE deleted IS NULL AND text LIKE ?)"
+        )
+        params.append(f"%{MARKER_PREFIX}%")
     where = " AND ".join(clauses)
     sql = (
         "SELECT photos.id AS photo_id, photos.item_id AS item_id, "
@@ -330,13 +399,31 @@ def build_selection(conn, args, tag_id):
     return [dict(row) for row in rows]
 
 
+def report_excluded_explicit_ids(args, photos):
+    if args.overwrite:
+        return
+    matched_item_ids = {photo["item_id"] for photo in photos}
+    matched_photo_ids = {photo["photo_id"] for photo in photos}
+    missing_items = set(args.item or []) - matched_item_ids
+    missing_photos = set(args.photo or []) - matched_photo_ids
+    missing = sorted(missing_items) + sorted(missing_photos)
+    if missing:
+        kind = "item/photo" if missing_items and missing_photos else ("item" if missing_items else "photo")
+        ids = ", ".join(str(i) for i in missing)
+        print(
+            f"Note: {len(missing)} explicitly requested {kind} id(s) ({ids}) were already "
+            f"processed and excluded; use --overwrite to reprocess them.",
+            file=sys.stderr,
+        )
+
+
 def apply_limit(photos, args):
     if args.limit is not None:
         photos = photos[: args.limit]
     return photos
 
 
-def load_image_b64(project_dir, relative_path, max_dimension):
+def load_image(project_dir, relative_path, max_dimension):
     full_path = project_dir / relative_path
     with Image.open(full_path) as image:
         image = image.convert("RGB")
@@ -346,9 +433,42 @@ def load_image_b64(project_dir, relative_path, max_dimension):
             scale = max_dimension / float(longest)
             new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
             image = image.resize(new_size, Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=90)
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
+        return image.copy()
+
+
+def image_to_b64(image):
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=90)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def verify_tesseract_available(lang):
+    try:
+        available_langs = set(pytesseract.get_languages(config=""))
+    except pytesseract.TesseractNotFoundError:
+        raise SystemExit(
+            "tesseract is not installed or not on PATH. Install it first, e.g. on "
+            "macOS: brew install tesseract tesseract-lang"
+        )
+    if not available_langs:
+        raise SystemExit(
+            "Could not determine which tesseract language packs are installed "
+            "(tesseract --list-langs reported none). Check your tesseract install."
+        )
+    if lang not in available_langs:
+        listing = ", ".join(sorted(available_langs))
+        raise SystemExit(
+            f"Tesseract language '{lang}' is not installed.\n"
+            f"Install it, e.g. on macOS: brew install tesseract-lang\n"
+            f"Languages currently available: {listing}"
+        )
+
+
+def call_tesseract(image, lang, timeout):
+    try:
+        return pytesseract.image_to_string(image, lang=lang, timeout=timeout)
+    except (pytesseract.TesseractError, RuntimeError) as error:
+        raise RuntimeError(f"tesseract failed: {error}") from error
 
 
 def verify_model_available(host, model):
@@ -368,14 +488,41 @@ def verify_model_available(host, model):
         )
 
 
-def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens):
+def describe_ollama_error(error, server_detail):
+    detail_lower = server_detail.lower()
+    if server_detail and "repeat limit" in detail_lower:
+        return (
+            f"{error} - {server_detail} "
+            f"(the model got stuck generating the same token repeatedly, usually "
+            f"on blank, very faint, or badly damaged pages; try raising "
+            f"--repeat-penalty above its current value, or inspect this photo "
+            f"to see if it is actually legible)"
+        )
+    if server_detail and ("context" in detail_lower or "slot" in detail_lower):
+        return (
+            f"{error} - {server_detail} "
+            f"(the image plus prompt used more tokens than the model's context "
+            f"window allows; try raising --num-ctx, or lowering --max-dimension "
+            f"or --max-tokens)"
+        )
+    if server_detail:
+        return f"{error} - {server_detail}"
+    return str(error)
+
+
+def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens, num_ctx, repeat_penalty):
     url = f"{host.rstrip('/')}/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
         "images": [image_b64],
         "stream": False,
-        "options": {"temperature": 0, "num_predict": max_tokens},
+        "options": {
+            "temperature": 0,
+            "num_predict": max_tokens,
+            "num_ctx": num_ctx,
+            "repeat_penalty": repeat_penalty,
+        },
     }
     last_error = None
     for attempt in range(retries + 1):
@@ -384,8 +531,17 @@ def call_ollama(host, model, prompt, image_b64, timeout, retries, max_tokens):
             response.raise_for_status()
             data = response.json()
             return data.get("response", "").strip()
+        except requests.HTTPError as error:
+            server_detail = ""
+            try:
+                server_detail = response.json().get("error", "")
+            except ValueError:
+                server_detail = response.text.strip()
+            last_error = describe_ollama_error(error, server_detail)
+            if attempt < retries:
+                time.sleep(2 ** attempt)
         except (requests.RequestException, ValueError) as error:
-            last_error = error
+            last_error = str(error)
             if attempt < retries:
                 time.sleep(2 ** attempt)
     raise RuntimeError(f"Ollama request failed after {retries + 1} attempts: {last_error}")
@@ -403,16 +559,34 @@ def clean_ocr_text(raw_text):
     return text
 
 
+def is_no_text_response(text):
+    normalized = text.strip().strip(".").lower()
+    return normalized in {"[no text identified]", "no text identified"}
+
+
 def make_marker(model_name):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"{MARKER_PREFIX} {model_name} - {timestamp}]"
 
 
-def finalize_note_text(ocr_text, model_name, add_marker):
+def finalize_note_text(ocr_text, model_name):
     text = ocr_text.rstrip("\n")
-    if add_marker:
-        text = f"{text}\n\n{make_marker(model_name)}"
-    return text
+    return f"{text}\n\n{make_marker(model_name)}"
+
+
+def txt_output_path(txt_dir, photo):
+    item_dir = Path(txt_dir) / f"item_{photo['item_id']}"
+    stem = Path(photo["filename"]).stem
+    return item_dir / f"photo_{photo['photo_id']}_{stem}.txt"
+
+
+def write_txt_file(path, text, backup_existing):
+    if backup_existing and path.exists():
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = path.with_name(f"{path.name}.bak-{timestamp}")
+        shutil.copy2(path, backup_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def build_note_state(text):
@@ -460,22 +634,41 @@ def insert_note(conn, photo_id, text, state, language):
 
 def process_photo(conn, project_dir, photo, args, tag_id):
     start = time.time()
+    txt_path = None
+    if args.output in ("txt", "both"):
+        txt_path = txt_output_path(args.txt_dir, photo)
+        if txt_path.exists() and not args.overwrite:
+            return {
+                "photo_id": photo["photo_id"],
+                "filename": photo["filename"],
+                "status": "skipped",
+                "elapsed": time.time() - start,
+            }
     try:
-        image_b64 = load_image_b64(project_dir, photo["path"], args.max_dimension)
-        prompt = PROMPTS[args.mode]
-        raw_text = call_ollama(
-            args.ollama_host,
-            args.model,
-            prompt,
-            image_b64,
-            args.timeout,
-            args.retries,
-            args.max_tokens,
-        )
+        image = load_image(project_dir, photo["path"], args.max_dimension)
+        if args.engine == "tesseract":
+            raw_text = call_tesseract(image, args.tesseract_lang, args.timeout)
+            engine_label = f"tesseract {args.tesseract_version}:{args.tesseract_lang}"
+        else:
+            image_b64 = image_to_b64(image)
+            prompt = PROMPTS[args.mode]
+            raw_text = call_ollama(
+                args.ollama_host,
+                args.model,
+                prompt,
+                image_b64,
+                args.timeout,
+                args.retries,
+                args.max_tokens,
+                args.num_ctx,
+                args.repeat_penalty,
+            )
+            engine_label = args.model
         ocr_text = clean_ocr_text(raw_text)
-        if not ocr_text:
-            raise RuntimeError("empty OCR response")
-        final_text = finalize_note_text(ocr_text, args.model, not args.no_marker)
+        no_text = not ocr_text or is_no_text_response(ocr_text)
+        if no_text:
+            ocr_text = "[no text identified]"
+        final_text = finalize_note_text(ocr_text, engine_label)
         plain_text = build_note_plain_text(final_text)
         state = build_note_state(final_text)
     except Exception as error:
@@ -492,15 +685,19 @@ def process_photo(conn, project_dir, photo, args, tag_id):
             "filename": photo["filename"],
             "status": "dry-run",
             "chars": len(ocr_text),
+            "no_text": no_text,
             "elapsed": time.time() - start,
             "text": ocr_text,
         }
     language = args.language.strip().lower()
     try:
-        if args.overwrite:
-            stale_ids = existing_marker_note_ids(conn, photo["photo_id"])
-            soft_delete_notes(conn, stale_ids)
-        insert_note(conn, photo["photo_id"], plain_text, state, language)
+        if args.output in ("notes", "both"):
+            if args.overwrite:
+                stale_ids = existing_marker_note_ids(conn, photo["photo_id"])
+                soft_delete_notes(conn, stale_ids)
+            insert_note(conn, photo["photo_id"], plain_text, state, language)
+        if args.output in ("txt", "both"):
+            write_txt_file(txt_path, final_text, backup_existing=args.overwrite)
         if not args.no_tag:
             tag_photo(conn, photo["photo_id"], tag_id)
             tag_item(conn, photo["item_id"], tag_id)
@@ -511,7 +708,7 @@ def process_photo(conn, project_dir, photo, args, tag_id):
             "photo_id": photo["photo_id"],
             "filename": photo["filename"],
             "status": "failed",
-            "error": f"database write failed: {error}",
+            "error": f"write failed: {error}",
             "elapsed": time.time() - start,
         }
     return {
@@ -519,6 +716,7 @@ def process_photo(conn, project_dir, photo, args, tag_id):
         "filename": photo["filename"],
         "status": "ok",
         "chars": len(ocr_text),
+        "no_text": no_text,
         "elapsed": time.time() - start,
     }
 
@@ -526,7 +724,8 @@ def process_photo(conn, project_dir, photo, args, tag_id):
 def format_progress(index, total, photo, result):
     base = f"[{index}/{total}] photo {photo['photo_id']} {photo['filename']} - {result['status']}"
     if result["status"] in ("ok", "dry-run"):
-        return f"{base} - {result['chars']} chars - {result['elapsed']:.1f}s"
+        suffix = " - no text identified" if result.get("no_text") else f" - {result['chars']} chars"
+        return f"{base}{suffix} - {result['elapsed']:.1f}s"
     if result["status"] == "failed":
         return f"{base} - {result['error']}"
     return base
@@ -534,20 +733,27 @@ def format_progress(index, total, photo, result):
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    warn_on_irrelevant_engine_flags(args)
+    if args.output in ("txt", "both") and not args.txt_dir:
+        raise SystemExit("--txt-dir is required when --output is 'txt' or 'both'")
     project_dir, db_path, _assets_dir = project_paths(args.project)
     check_not_open(db_path, args.force)
     if args.preview:
         conn = connect(db_path)
-        tag_id = lookup_tag(conn, args.tag) if not args.no_tag else None
-        photos = build_selection(conn, args, tag_id)
+        photos = build_selection(conn, args)
         photos = apply_limit(photos, args)
         for photo in photos:
             print(f"item {photo['item_id']:>6}  photo {photo['photo_id']:>6}  {photo['filename']}")
         print(f"{len(photos)} photo(s) matched")
         conn.close()
         return
-    verify_model_available(args.ollama_host, args.model)
-    if not args.dry_run:
+    if args.engine == "tesseract":
+        verify_tesseract_available(args.tesseract_lang)
+        args.tesseract_version = str(pytesseract.get_tesseract_version())
+    else:
+        verify_model_available(args.ollama_host, args.model)
+    writes_db = args.output in ("notes", "both") or not args.no_tag
+    if not args.dry_run and writes_db:
         backup_path = backup_database(db_path, args.no_backup)
         if backup_path:
             print(f"Backed up {db_path.name} to {backup_path.name}")
@@ -559,7 +765,9 @@ def main(argv=None):
         else:
             tag_id = ensure_tag(conn, args.tag, args.tag_color)
             conn.commit()
-    photos = build_selection(conn, args, tag_id)
+    photos = build_selection(conn, args)
+    if args.item or args.photo:
+        report_excluded_explicit_ids(args, photos)
     photos = apply_limit(photos, args)
     total = len(photos)
     print(f"Selected {total} photo(s) to process")

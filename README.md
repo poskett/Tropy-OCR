@@ -4,13 +4,17 @@ using a **local** vision model via [Ollama](https://ollama.com), and write the
 transcriptions directly into Tropy's **Notes** field — one note per photo
 (page).
 
+Alternatively, Tropy OCR can call tesseract instead of a local vision model.
+
 ## AI declaration
 The code for this project was generated using Claude Code (Sonnet 5). This readme 
-file was generated from the Claude Code project and then edited by the commit author.
+file was generated from the Claude Code project and then edited by James Poskett.
 
 ## Disclaimer
 This Python script is an independent, unofficial tool. It is not affiliated with or
-endorsed by the Tropy project. It works by reading and writing Tropy's
+endorsed by the Tropy project. It is released **as is and without *warranty**.
+
+It works by reading and writing Tropy's
 internal SQLite database directly, so please read the **Safety** section
 below before running it on a project.
 
@@ -33,13 +37,19 @@ below before running it on a project.
 - Appends a short, human-readable marker line to the note itself (e.g.
   `[Automated OCR - model: qwen3-vl:30b-a3b-instruct-q4_K_M - 2026-10-01T15:31:17Z]`)
   so anyone reading that note later knows it's machine-generated, and which
-  model/when.
+  model/when. This marker is also how the tool recognizes a photo as
+  "already done" on later runs — delete a photo's note in Tropy and it will
+  automatically be reprocessed next time, no flags needed. Tags are applied
+  too, but are purely informational (for browsing/filtering in Tropy) and
+  don't affect what gets reprocessed.
 
 ## Requirements
 
 - Python 3.10+
+- Python packages in requirements.txt
 - [Ollama](https://ollama.com) running locally, with a vision-capable model
   pulled (e.g. `ollama pull qwen3-vl:30b-a3b-instruct-q4_K_M`)
+- For `--engine tesseract`: the `tesseract` binary installed separately
 - Tropy, **closed**, while you run this tool
 
 ## Install
@@ -68,15 +78,15 @@ After activating venv, run the tool the same way on any platform:
 - **Make a manual backup** of your .tropy file before running this tool.
 - **Close Tropy before running this tool.** It writes directly to Tropy's
   SQLite database file; the tool checks and attempts to abort if Tropy is open.
+- Do **not** open Tropy whilst the tool is running. There are no additional safety checks.
 - The tool makes a timestamped backup copy of `project.tpy` before writing,
   unless you pass `--no-backup`. Keep this backup until you've confirmed the results
   look right in Tropy.
 - Always try `--dry-run` on a few photos first.
 
-
 ## Usage
 
-Basic run, everything not yet tagged:
+Basic run, everything not yet transcribed:
 
 ```sh
 python tropy_ocr.py --project "My Project.tropy"
@@ -95,7 +105,7 @@ python tropy_ocr.py --project "My Project.tropy" --item 3355
 python tropy_ocr.py --project "My Project.tropy" --photo 3994
 ```
 
-Process everything in a Tropy list you've curated in the app:
+Process everything in a Tropy list you've curated in the app (this is the recommended use):
 
 ```sh
 python tropy_ocr.py --project "My Project.tropy" --list "To transcribe"
@@ -157,8 +167,7 @@ python tropy_ocr.py --project "My Project.tropy" --mode handwritten
 | `--preview` | off | Print matching item/photo ids and filenames, then exit (no OCR, no writes) |
 | `--limit` | — | Process at most N photos |
 | `--tag` / `--tag-color` | `ocr:auto` | Tag applied to processed photos |
-| `--no-tag` | off | Don't tag photos; fall back to marker-text detection for skip/overwrite |
-| `--no-marker` | off | Don't append the marker footer to the note text |
+| `--no-tag` | off | Don't tag photos (tags are informational only; which photos are already done is always detected by the marker footer in their note) |
 | `--overwrite` | off | Regenerate notes previously created by this tool |
 | `--dry-run` | off | Run OCR and print results; write nothing to the database |
 | `--max-dimension` | `2000` | Resize images to this many pixels on the longest edge before sending |
@@ -179,12 +188,14 @@ Run `python tropy_ocr.py --help` for the full list.
 3. Run for real on one small `--item` first, then reopen the project in
    Tropy and check the Notes panel for a couple of pages.
 4. Run on the rest of the collection. Re-running later only processes new
-   or un-tagged photos, so it's safe to do in batches.
+   or not-yet-transcribed photos, so it's safe to do in batches. Delete a
+   photo's note in Tropy to have it picked up again automatically.
 
 ## Known limitations
 
 - OCR quality depends entirely on the chosen Ollama model; try a different
   `--model` or `--mode` if results are poor for a particular kind of document.
+- Tesseract OCR is faster but much lower quality, and cannot process handwriting.
 - This tool writes `notes.text`/`notes.state` to match Tropy's own internal
   format as closely as possible. It is not an official API and could in principle need updating
   if Tropy changes its note storage format in a future release.
