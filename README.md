@@ -1,5 +1,5 @@
-# Tropy OCR (Python)
-A **Python** script to OCR document images in a [Tropy](https://tropy.org) project
+# Tropy OCR
+Transcribe document images in a [Tropy](https://tropy.org) project
 using a **local** vision model via [Ollama](https://ollama.com), and write the
 transcriptions directly into Tropy's **Notes** field — one note per photo
 (page).
@@ -7,16 +7,17 @@ transcriptions directly into Tropy's **Notes** field — one note per photo
 Alternatively, Tropy OCR can call tesseract instead of a local vision model.
 
 ## AI declaration
-The code for this project was generated using Claude Code (Sonnet 5). This readme 
+The code for this project was generated using Claude Code (Sonnet 5.5). This readme 
 file was generated from the Claude Code project and then edited by James Poskett.
 
 ## Disclaimer
 This Python script is an independent, unofficial tool. It is not affiliated with or
-endorsed by the Tropy project. It is released **as is and without warranty**.
+endorsed by the Tropy project. It is released **as is and without *warranty**.
 
-It works by reading and writing Tropy's
-internal SQLite database directly, so please read the **Safety** section
-below before running it on a project.
+It can work in two ways: by reading and writing Tropy's
+internal SQLite database directly (`--project`, Tropy closed), or through Tropy's
+own local API while Tropy is open (`--api-url`). Please read the **Safety**
+section below before running it on a project.
 
 ## Benefits
 
@@ -32,10 +33,13 @@ below before running it on a project.
   transcription (preserving line breaks, no commentary, `[illegible]` for
   unreadable text).
 - Writes the result into Tropy's Notes field for that photo.
-- Tags both the photo and its parent item (default tag `ocr:auto`) with
-  Tropy's own tags feature.
+- Tags the parent **item** (default tag `ocr:auto`) with Tropy's own tags
+  feature, once its first note has been saved. Photos themselves are not tagged.
+  Items whose photos were all transcribed in an earlier run are tagged too.
+  The tag is created once and reused. If tagging fails, the note is still kept
+  and a warning is printed.
 - Appends a short, human-readable marker line to the note itself (e.g.
-  `[Automated OCR - model: qwen3-vl:30b-a3b-instruct-q4_K_M - 2026-10-01T15:31:17Z]`)
+  `[Automated OCR - model: qwen3-vl:8b-instruct-q4_K_M - 2026-10-01T15:31:17Z]`)
   so anyone reading that note later knows it's machine-generated, and which
   model/when. This marker is also how the tool recognizes a photo as
   "already done" on later runs — delete a photo's note in Tropy and it will
@@ -48,9 +52,10 @@ below before running it on a project.
 - Python 3.10+
 - Python packages in requirements.txt
 - [Ollama](https://ollama.com) running locally, with a vision-capable model
-  pulled (e.g. `ollama pull qwen3-vl:30b-a3b-instruct-q4_K_M`)
+  pulled (e.g. `ollama pull qwen3-vl:8b-instruct-q4_K_M`)
 - For `--engine tesseract`: the `tesseract` binary installed separately
-- Tropy, **closed**, while you run this tool
+- Tropy **closed** while you run with `--project`, or Tropy **open** with its API
+  switched on (Tropy Preferences) while you run with `--api-url`
 
 ## Which model?
 
@@ -62,7 +67,7 @@ A few good options:
 - [qwen3-vl:8b-instruct-q4_K_M](https://ollama.com/library/qwen3-vl:8b-instruct-q4_K_M)
 - [ministral-3:8b-instruct-2512-q4_K_M](https://ollama.com/library/ministral-3:8b-instruct-2512-q4_K_M)
 
-Both will run on a M5 MacBook with 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
+Both will run on a M5 MacBook wiht 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
 
 ## Install
 
@@ -88,13 +93,52 @@ After activating venv, run the tool the same way on any platform:
 ## Safety
 
 - **Make a manual backup** of your .tropy file before running this tool.
-- **Close Tropy before running this tool.** It writes directly to Tropy's
+- **Close Tropy before running with `--project`** (not needed with `--api-url`). It writes directly to Tropy's
   SQLite database file; the tool checks and attempts to abort if Tropy is open.
 - Do **not** open Tropy whilst the tool is running. There are no additional safety checks.
-- The tool makes a timestamped backup copy of `project.tpy` before writing,
-  unless you pass `--no-backup`. Keep this backup until you've confirmed the results
-  look right in Tropy.
+- With `--project`, the tool makes a timestamped backup of `project.tpy` before
+  writing, unless you pass `--no-backup`. It is a consistent snapshot made with
+  SQLite's own backup feature and checked for corruption before anything is
+  changed. Backups go in a folder next to the project (for `My Project.tropy`:
+  `My Project backups`), not inside it, and only the newest 3 are kept
+  (`--keep-backups N`; `0` keeps all; `--backup-dir` chooses another folder).
+  Older backups from earlier versions that sit inside the `.tropy` folder are
+  never deleted automatically. To restore, close Tropy and copy a backup over
+  `project.tpy`, keeping the name `project.tpy`.
 - Always try `--dry-run` on a few photos first.
+
+## Two ways to run
+
+| | `--project "My Project.tropy"` | `--api-url http://localhost:2019` |
+|---|---|---|
+| Tropy must be | closed | open, with the API switched on |
+| How notes are written | directly into the database file | through Tropy's own API (live in the app) |
+| Backup of `project.tpy` | automatic (unless `--no-backup`) | not needed, the tool never touches the file |
+| With no filter | everything is processed | everything is processed |
+| Select by | `--item`, `--photo`, `--list "name"`, `--filename-glob` | the same, plus `--list-id` (the numeric id of a list) |
+| Progress | terminal | terminal, plus an optional live page with `--progress-port 0` |
+
+Filters work the same way in both: they combine (an item must match all of
+them), `--list` includes sublists, and with no filter **every** item is
+processed, so try `--preview` or `--dry-run --limit 5` first. In API mode,
+`--list` takes the list's name (or a `Parent > Child` path), exactly as in the
+other mode. To use `--item`, find the numeric id by opening
+`http://localhost:2019/project/items` in a browser while Tropy is open (change
+the port if yours differs).
+
+Everything else (models, prompts, the marker line, skipping finished photos,
+`--overwrite`, tagging) behaves the same in both. This is the same script that
+the Tropy OCR plugin runs.
+
+With Tropy open (API mode):
+
+```sh
+python tropy_ocr.py --api-url http://localhost:2019 --item 3355 --preview
+python tropy_ocr.py --api-url http://localhost:2019 --item 3355 --progress-port 0
+```
+
+If Tropy is closed part-way through, the tool stops cleanly after the current
+photo and tells you; run it again to carry on (finished photos are skipped).
 
 ## Usage
 
@@ -169,8 +213,13 @@ python tropy_ocr.py --project "My Project.tropy" --mode handwritten
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--project` | *(required)* | Path to the `.tropy` project bundle |
-| `--model` | `qwen3-vl:30b-a3b-instruct-q4_K_M` | Ollama vision model |
+| `--project` | *(required unless `--api-url`)* | Path to the `.tropy` project bundle (Tropy closed) |
+| `--api-url` | — | Use Tropy's local API instead, e.g. `http://localhost:2019` (Tropy open) |
+| `--list-id` | — | API mode: Tropy list id to process |
+| `--progress-port` | — | API mode: serve a live progress page on this port (`0` picks one) |
+| `--run-label` | — | API mode: name shown on the progress page |
+| `--tesseract-cmd` | auto | Full path to `tesseract` if it is not found automatically |
+| `--model` | `qwen3-vl:8b-instruct-q4_K_M` | Ollama vision model |
 | `--ollama-host` | `http://localhost:11434` | Ollama server URL |
 | `--mode` | `auto` | `auto`, `printed`, or `handwritten` prompt style |
 | `--item` / `--photo` | — | Restrict to specific item/photo ids (repeatable) |
@@ -178,13 +227,15 @@ python tropy_ocr.py --project "My Project.tropy" --mode handwritten
 | `--filename-glob` | — | Restrict to photos whose filename matches a glob |
 | `--preview` | off | Print matching item/photo ids and filenames, then exit (no OCR, no writes) |
 | `--limit` | — | Process at most N photos |
-| `--tag` / `--tag-color` | `ocr:auto` | Tag applied to processed photos |
-| `--no-tag` | off | Don't tag photos (tags are informational only; which photos are already done is always detected by the marker footer in their note) |
+| `--tag` / `--tag-color` | `ocr:auto` | Tag applied to processed items |
+| `--no-tag` | off | Don't tag items (tags are informational only; which photos are already done is always detected by the marker footer in their note) |
 | `--overwrite` | off | Regenerate notes previously created by this tool |
 | `--dry-run` | off | Run OCR and print results; write nothing to the database |
 | `--max-dimension` | `2000` | Resize images to this many pixels on the longest edge before sending |
 | `--max-tokens` | `4096` | Maximum tokens the model may generate per photo |
 | `--no-backup` | off | Skip the automatic backup of `project.tpy` |
+| `--backup-dir` | beside the project | Folder for `project.tpy` backups |
+| `--keep-backups` | `3` | Keep only the newest N backups (`0` keeps all); also applies to `.txt` backups |
 | `--force` | off | Proceed even if the project looks open |
 | `--log-file` | — | Append a JSONL record per photo for offline review |
 | `--language` | `en` | Language code stored on each note |
@@ -207,6 +258,7 @@ Run `python tropy_ocr.py --help` for the full list.
 
 - OCR quality depends entirely on the chosen Ollama model; try a different
   `--model` or `--mode` if results are poor for a particular kind of document.
+- Images are read as stored on disk. Rotation set inside Tropy, and EXIF orientation, are not applied before OCR, so sideways scans may transcribe badly; rotate the source file if needed.
 - Tesseract OCR is faster but much lower quality, and cannot process handwriting.
 - This tool writes `notes.text`/`notes.state` to match Tropy's own internal
   format as closely as possible. It is not an official API and could in principle need updating
