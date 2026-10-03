@@ -29,28 +29,24 @@ section below before running it on a project.
 ## What it does
 
 - Finds photos (pages) in your Tropy project matching the filters you give it.
+- Handles PDFs and multi-page TIFFs page by page (updated in v0.3.1)
 - Sends each image to a local Ollama vision model and asks for a literal
   transcription (preserving line breaks, no commentary, `[illegible]` for
   unreadable text).
 - Writes the result into Tropy's Notes field for that photo.
 - Tags the parent **item** (default tag `ocr:auto`) with Tropy's own tags
-  feature, once its first note has been saved. Photos themselves are not tagged.
-  Items whose photos were all transcribed in an earlier run are tagged too.
-  The tag is created once and reused. If tagging fails, the note is still kept
-  and a warning is printed.
+  feature, once its first note has been saved.
 - Appends a short, human-readable marker line to the note itself (e.g.
   `[Automated OCR - model: qwen3-vl:8b-instruct-q4_K_M - 2026-10-01T15:31:17Z]`)
   so anyone reading that note later knows it's machine-generated, and which
   model/when. This marker is also how the tool recognizes a photo as
   "already done" on later runs — delete a photo's note in Tropy and it will
-  automatically be reprocessed next time, no flags needed. Tags are applied
-  too, but are purely informational (for browsing/filtering in Tropy) and
-  don't affect what gets reprocessed.
+  automatically be reprocessed next time, no flags needed.
 
 ## Requirements
 
 - Python 3.10+
-- Python packages in requirements.txt
+- Python packages in requirements.txt (Pillow, requests, pytesseract, and pypdfium2 for PDF pages; no separate PDF software is needed)
 - [Ollama](https://ollama.com) running locally, with a vision-capable model
   pulled (e.g. `ollama pull qwen3-vl:8b-instruct-q4_K_M`)
 - For `--engine tesseract`: the `tesseract` binary installed separately
@@ -258,6 +254,8 @@ Run `python tropy_ocr.py --help` for the full list.
 
 - OCR quality depends entirely on the chosen Ollama model; try a different
   `--model` or `--mode` if results are poor for a particular kind of document.
+- PDF pages are rendered by the tool at `--max-dimension` pixels on the longest edge, so very small print in a large-format PDF may need a higher `--max-dimension`. Password-protected PDFs fail with a clear message, page by page.
+- Vision models sometimes get stuck repeating a page's text over and over. The tool watches the stream, stops the model as soon as it sees a long block repeat, keeps the first pass, adds a visible line to the note (`[OCR stopped: the model began repeating itself ... please check this page]`) and lists the photo at the end of the run. A page that genuinely repeats the same long passage three or more times in a row can be cut by mistake; the notice tells you to check it. If it happens often, raise `--repeat-penalty`, lower `--max-tokens`, or try another model.
 - Images are read as stored on disk. Rotation set inside Tropy, and EXIF orientation, are not applied before OCR, so sideways scans may transcribe badly; rotate the source file if needed.
 - Tesseract OCR is faster but much lower quality, and cannot process handwriting.
 - This tool writes `notes.text`/`notes.state` to match Tropy's own internal
