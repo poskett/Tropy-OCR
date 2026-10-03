@@ -1,5 +1,5 @@
-# Tropy OCR
-Transcribe document images in a [Tropy](https://tropy.org) project
+# Tropy OCR (Python)
+A **Python** script to OCR document images in a [Tropy](https://tropy.org) project
 using a **local** vision model via [Ollama](https://ollama.com), and write the
 transcriptions directly into Tropy's **Notes** field — one note per photo
 (page).
